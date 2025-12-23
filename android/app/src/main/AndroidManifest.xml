@@ -3,13 +3,13 @@
   <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
   <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
     <application
-        android:label="mapbox_nigeria_app"
+        android:label="Trail_App"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
-        <!-- Mapbox access token meta-data goes here -->
+        <!-- Google Maps API key meta-data -->
         <meta-data
-            android:name="com.mapbox.token"
-            android:value="pk.eyJ1IjoidG9uYnkiLCJhIjoiY21kZ3k2dHZyMHJ5YjJpczhtdDNtYTdpdiJ9.hWBjLfCRE14aJoUuV3JV5w"/>
+            android:name="com.google.android.geo.API_KEY"
+            android:value="AIzaSyD3Ot82iTrRjeLfFLvrp7dznfdHi8DzRpw"/>
         <activity
             android:name=".MainActivity"
             android:exported="true"

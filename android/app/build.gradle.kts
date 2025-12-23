@@ -5,18 +5,10 @@ plugins {
     id("dev.flutter.flutter-gradle-plugin")
 }
 
-// ADD THESE LINES RIGHT HERE:
-val flutterVersionCode = property("flutter.versionCode").toString().toIntOrNull() ?: 1
-val flutterVersionName = property("flutter.versionName").toString()
-val flutterCompileSdkVersion = property("flutter.compileSdkVersion").toString().toIntOrNull() ?: 34
-val flutterMinSdkVersion = property("flutter.minSdkVersion").toString().toIntOrNull() ?: 21
-val flutterTargetSdkVersion = property("flutter.targetSdkVersion").toString().toIntOrNull() ?: 34
-val flutterNdkVersion = property("flutter.ndkVersion").toString()
-
 android {
-    namespace = "com.example.mapbox_nigeria_app"
-    compileSdk = flutter.compileSdkVersion
-    ndkVersion = flutter.ndkVersion
+    namespace = "com.example.trail_app"
+    compileSdk = 35
+    ndkVersion = "27.0.12077973"
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_11
@@ -29,7 +21,7 @@ android {
 
     defaultConfig {
         // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
-        applicationId = "com.example.mapbox_nigeria_app"
+        applicationId = "com.example.trail_app"
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
         minSdk = flutter.minSdkVersion

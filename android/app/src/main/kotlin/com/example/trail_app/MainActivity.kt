@@ -1,4 +1,4 @@
-package com.example.mapbox_nigeria_app
+package com.example.trail_app
 
 import io.flutter.embedding.android.FlutterActivity
 
