@@ -307,6 +307,11 @@ class MapScreenState extends State<MapScreen> {
     final String destinationAddress = destinationController.text;
 
     if (originAddress.isEmpty || destinationAddress.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Please enter both origin and destination')),
+        );
+      }
       return;
     }
 
@@ -326,6 +331,7 @@ class MapScreenState extends State<MapScreen> {
             _decodePolyline(encodedPolyline);
 
         setState(() {
+          _polylines.clear();
           _polylines.add(
             Polyline(
               polylineId: const PolylineId('route'),
@@ -337,15 +343,31 @@ class MapScreenState extends State<MapScreen> {
           final leg = data['routes'][0]['legs'][0];
           _distance = leg['distance']['text'];
           _eta = leg['duration']['text'];
-          _instructions = (leg['steps'] as List).map<String>((step) => step['html_instructions'] as String).toList();
+          _instructions = (leg['steps'] as List)
+              .map<String>((step) => _stripHtmlTags(step['html_instructions'] as String))
+              .toList();
         });
       } else {
-        // Handle error
         debugPrint('Error getting directions: ${data['status']}');
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Directions failed: ${data['status']}')),
+          );
+        }
       }
     } catch (e) {
-      // Handle error
+      debugPrint('Directions Exception: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Failed to get directions: Network error')),
+        );
+      }
     }
+  }
+
+  String _stripHtmlTags(String htmlString) {
+    final RegExp exp = RegExp(r'<[^>]*>', multiLine: true, caseSensitive: true);
+    return htmlString.replaceAll(exp, '').replaceAll('&nbsp;', ' ');
   }
 
   @override
