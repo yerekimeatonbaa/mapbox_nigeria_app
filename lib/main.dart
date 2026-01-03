@@ -1,9 +1,19 @@
 import 'dart:convert';
+import 'dart:async';
+import 'dart:ui' as ui;
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:http/http.dart' as http;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:geolocator/geolocator.dart';
+import 'package:flutter_tts/flutter_tts.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'dart:math' show cos, sqrt, asin;
+import 'models/saved_place.dart';
+import 'services/database_helper.dart';
+import 'screens/saved_places_screen.dart';
+import 'screens/offline_maps_screen.dart';
 
 
 void main() async {
@@ -78,10 +88,29 @@ class MapScreenState extends State<MapScreen> {
   String? _eta;
   String? _distance;
   List<String> _instructions = [];
+  BitmapDescriptor? _carIcon;
+  
+  // Navigation state
+  bool _isNavigating = false;
+  StreamSubscription<Position>? _positionStream;
+  FlutterTts? _flutterTts;
+  List<Map<String, dynamic>> _navigationSteps = [];
+  int _currentStepIndex = 0;
+  LatLng? _currentPosition;
+  LatLng? _destination;
+  
+  // Traffic and offline maps
+  bool _showTraffic = false;
+  List<SavedPlace> _savedPlaces = [];
+  SharedPreferences? _prefs;
 
   @override
   void initState() {
     super.initState();
+    _createCarIcon();
+    _initTts();
+    _initPreferences();
+    _loadSavedPlaces();
     debugPrint('API Key loaded: ${dotenv.env['GOOGLE_MAPS_API_KEY'] != null ? 'Yes' : 'No'}');
     if (dotenv.env['GOOGLE_MAPS_API_KEY'] == null ||
         dotenv.env['GOOGLE_MAPS_API_KEY']!.isEmpty) {
@@ -93,7 +122,6 @@ class MapScreenState extends State<MapScreen> {
       return;
     }
     _getCurrentLocation();
-    // Set a timeout for map loading
     Future.delayed(const Duration(seconds: 10), () {
       if (_isMapLoading && mounted) {
         setState(() {
@@ -105,6 +133,64 @@ class MapScreenState extends State<MapScreen> {
     });
   }
 
+  Future<void> _initPreferences() async {
+    _prefs = await SharedPreferences.getInstance();
+    setState(() {
+      _showTraffic = _prefs?.getBool('showTraffic') ?? false;
+    });
+  }
+
+  Future<void> _loadSavedPlaces() async {
+    try {
+      final places = await DatabaseHelper.instance.readAll();
+      setState(() {
+        _savedPlaces = places;
+      });
+    } catch (e) {
+      debugPrint('Error loading saved places: $e');
+    }
+  }
+
+  @override
+  void dispose() {
+    _positionStream?.cancel();
+    _flutterTts?.stop();
+    super.dispose();
+  }
+
+  Future<void> _initTts() async {
+    _flutterTts = FlutterTts();
+    await _flutterTts?.setLanguage("en-US");
+    await _flutterTts?.setSpeechRate(0.5);
+    await _flutterTts?.setVolume(1.0);
+    await _flutterTts?.setPitch(1.0);
+  }
+
+  Future<void> _createCarIcon() async {
+    final pictureRecorder = ui.PictureRecorder();
+    final canvas = Canvas(pictureRecorder);
+    final paint = Paint()..color = Colors.blue;
+    
+    const size = 60.0;
+    canvas.drawCircle(const Offset(size / 2, size / 2), size / 2, paint);
+    
+    final iconPainter = TextPainter(textDirection: TextDirection.ltr);
+    iconPainter.text = const TextSpan(
+      text: '🚗',
+      style: TextStyle(fontSize: 30.0),
+    );
+    iconPainter.layout();
+    iconPainter.paint(canvas, const Offset(15, 15));
+    
+    final picture = pictureRecorder.endRecording();
+    final image = await picture.toImage(size.toInt(), size.toInt());
+    final bytes = await image.toByteData(format: ui.ImageByteFormat.png);
+    
+    setState(() {
+      _carIcon = BitmapDescriptor.fromBytes(bytes!.buffer.asUint8List());
+    });
+  }
+
   void onMapCreated(GoogleMapController controller) {
     setState(() {
       mapController = controller;
@@ -113,56 +199,76 @@ class MapScreenState extends State<MapScreen> {
     });
   }
 
-  Future<void> _getCurrentLocation() async {
-    bool serviceEnabled;
-    LocationPermission permission;
-
-    // Test if location services are enabled.
-    serviceEnabled = await Geolocator.isLocationServiceEnabled();
-    if (!serviceEnabled) {
-      // Location services are not enabled don't continue
-      // accessing the position and request users of the
-      // App to enable the location services.
-      setState(() {
-        _errorMessage = 'Location services are disabled.';
-        _isMapLoading = false;
-      });
-      return;
+  Future<void> _getCurrentLocation({bool showMessage = false}) async {
+    if (showMessage && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Getting your location...')),
+      );
     }
 
-    permission = await Geolocator.checkPermission();
-    if (permission == LocationPermission.denied) {
-      permission = await Geolocator.requestPermission();
-      if (permission == LocationPermission.denied) {
-        // Permissions are denied, next time you could try
-        // requesting permissions again (this is also where
-        // Android's shouldShowRequestPermissionRationale
-        // returned true. According to Android guidelines
-        // your App should show an explanatory UI now.
+    try {
+      bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
+      if (!serviceEnabled) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Location services are disabled. Please enable location in your browser.'),
+              duration: Duration(seconds: 5),
+            ),
+          );
+        }
         setState(() {
-          _errorMessage = 'Location permissions are denied';
           _isMapLoading = false;
         });
         return;
       }
-    }
 
-    if (permission == LocationPermission.deniedForever) {
-      // Permissions are denied forever, handle appropriately.
-      setState(() {
-        _errorMessage =
-            'Location permissions are permanently denied, we cannot request permissions.';
-        _isMapLoading = false;
-      });
-      return;
-    }
+      LocationPermission permission = await Geolocator.checkPermission();
+      if (permission == LocationPermission.denied) {
+        permission = await Geolocator.requestPermission();
+        if (permission == LocationPermission.denied) {
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('Location permission denied. Please allow location access.'),
+                duration: Duration(seconds: 5),
+              ),
+            );
+          }
+          setState(() {
+            _isMapLoading = false;
+          });
+          return;
+        }
+      }
 
-    // When we reach here, permissions are granted and we can
-    // continue accessing the position of the device.
-    try {
-      Position position = await Geolocator.getCurrentPosition();
+      if (permission == LocationPermission.deniedForever) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Location permission permanently denied. Please enable in browser settings.'),
+              duration: Duration(seconds: 5),
+            ),
+          );
+        }
+        setState(() {
+          _isMapLoading = false;
+        });
+        return;
+      }
+
+      debugPrint('Getting current position...');
+      Position position = await Geolocator.getCurrentPosition(
+        desiredAccuracy: LocationAccuracy.high,
+        timeLimit: const Duration(seconds: 10),
+      );
+      
+      debugPrint('Position obtained: ${position.latitude}, ${position.longitude}');
       LatLng currentLocation = LatLng(position.latitude, position.longitude);
+      
       setState(() {
+        _currentPosition = currentLocation;
+        _markers.removeWhere((m) => m.markerId.value == 'currentLocation');
         _markers.add(
           Marker(
             markerId: const MarkerId('currentLocation'),
@@ -170,14 +276,33 @@ class MapScreenState extends State<MapScreen> {
             infoWindow: const InfoWindow(
               title: 'Your Location',
             ),
-            icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueBlue),
+            icon: _carIcon ?? BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueBlue),
           ),
         );
+        _isMapLoading = false;
       });
+      
       mapController?.animateCamera(CameraUpdate.newLatLngZoom(currentLocation, 15.0));
+      
+      if (showMessage && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Location found!'),
+            duration: Duration(seconds: 2),
+          ),
+        );
+      }
     } catch (e) {
+      debugPrint('Location error: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Failed to get location: ${e.toString()}'),
+            duration: const Duration(seconds: 5),
+          ),
+        );
+      }
       setState(() {
-        _errorMessage = 'Failed to get current location: $e';
         _isMapLoading = false;
       });
     }
@@ -206,6 +331,181 @@ class MapScreenState extends State<MapScreen> {
     });
   }
 
+  void _showLocationHelp() {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Row(
+          children: [
+            Icon(Icons.help_outline, color: Colors.blue),
+            SizedBox(width: 8),
+            Text('Enable Location'),
+          ],
+        ),
+        content: const SingleChildScrollView(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                'To use GPS navigation, you need to:',
+                style: TextStyle(fontWeight: FontWeight.bold),
+              ),
+              SizedBox(height: 12),
+              Text('1. Click the location icon (🎯) in your browser address bar'),
+              SizedBox(height: 8),
+              Text('2. Select "Allow" when prompted for location access'),
+              SizedBox(height: 8),
+              Text('3. Click the "My Location" button (📍) below'),
+              SizedBox(height: 12),
+              Text(
+                'Note: Location services must be enabled on your device.',
+                style: TextStyle(fontStyle: FontStyle.italic, fontSize: 12),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Got it'),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              Navigator.of(context).pop();
+              _getCurrentLocation(showMessage: true);
+            },
+            child: const Text('Try Now'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _saveCurrentPlace() async {
+    if (_currentPosition == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Please enable location first')),
+      );
+      return;
+    }
+    _showSavePlaceDialog(_currentPosition!);
+  }
+
+  Future<void> _showSavePlaceDialog(LatLng location) async {
+    final nameController = TextEditingController();
+    String selectedCategory = 'Favorite';
+
+    final result = await showDialog<bool>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setState) => AlertDialog(
+          title: const Text('Save Place'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: nameController,
+                decoration: const InputDecoration(
+                  labelText: 'Place Name',
+                  hintText: 'e.g., Home, Office, Favorite Restaurant',
+                ),
+              ),
+              const SizedBox(height: 16),
+              DropdownButtonFormField<String>(
+                value: selectedCategory,
+                decoration: const InputDecoration(labelText: 'Category'),
+                items: const [
+                  DropdownMenuItem(value: 'Home', child: Text('🏠 Home')),
+                  DropdownMenuItem(value: 'Work', child: Text('💼 Work')),
+                  DropdownMenuItem(value: 'Favorite', child: Text('❤️ Favorite')),
+                  DropdownMenuItem(value: 'Restaurant', child: Text('🍽️ Restaurant')),
+                  DropdownMenuItem(value: 'Shopping', child: Text('🛍️ Shopping')),
+                  DropdownMenuItem(value: 'Other', child: Text('📍 Other')),
+                ],
+                onChanged: (value) {
+                  setState(() => selectedCategory = value!);
+                },
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Cancel'),
+            ),
+            ElevatedButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('Save'),
+            ),
+          ],
+        ),
+      ),
+    );
+
+    if (result == true && nameController.text.isNotEmpty) {
+      try {
+        final place = SavedPlace(
+          name: nameController.text,
+          address: 'Lat: ${location.latitude.toStringAsFixed(6)}, Lng: ${location.longitude.toStringAsFixed(6)}',
+          latitude: location.latitude,
+          longitude: location.longitude,
+          category: selectedCategory,
+        );
+        await DatabaseHelper.instance.create(place);
+        await _loadSavedPlaces();
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Place saved successfully!')),
+          );
+        }
+      } catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Error saving place: $e')),
+          );
+        }
+      }
+    }
+  }
+
+  void _toggleTraffic() {
+    setState(() {
+      _showTraffic = !_showTraffic;
+      _prefs?.setBool('showTraffic', _showTraffic);
+    });
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(_showTraffic ? 'Traffic layer enabled' : 'Traffic layer disabled'),
+        duration: const Duration(seconds: 2),
+      ),
+    );
+  }
+
+  void _navigateToSavedPlaces() {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (context) => SavedPlacesScreen(
+          onPlaceSelected: (location, name) {
+            mapController?.animateCamera(
+              CameraUpdate.newLatLngZoom(location, 15.0),
+            );
+            setState(() {
+              _markers.add(
+                Marker(
+                  markerId: MarkerId(name),
+                  position: location,
+                  infoWindow: InfoWindow(title: name),
+                ),
+              );
+            });
+          },
+        ),
+      ),
+    );
+  }
+
   void onSearch() async {
     final String query = searchController.text;
     if (query.isEmpty) {
@@ -228,7 +528,7 @@ class MapScreenState extends State<MapScreen> {
         final double lng = data['results'][0]['geometry']['location']['lng'];
         final LatLng location = LatLng(lat, lng);
 
-        mapController?.animateCamera(CameraUpdate.newLatLng(location));
+        mapController?.animateCamera(CameraUpdate.newLatLngZoom(location, 15.0));
         setState(() {
           _markers.add(
             Marker(
@@ -239,10 +539,9 @@ class MapScreenState extends State<MapScreen> {
               ),
             ),
           );
-          _suggestions = []; // Clear suggestions after search
+          _suggestions = [];
         });
       } else {
-        // Handle error
         debugPrint('Search Error: ${data['status']} - ${data['error_message'] ?? 'No error message'}');
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
@@ -251,7 +550,6 @@ class MapScreenState extends State<MapScreen> {
         }
       }
     } catch (e) {
-      // Handle error
       debugPrint('Search Exception: $e');
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -269,9 +567,13 @@ class MapScreenState extends State<MapScreen> {
       return;
     }
 
+    if (query.length < 2) {
+      return;
+    }
+
     final String apiKey = dotenv.env['GOOGLE_MAPS_API_KEY']!;
     final String url =
-        'https://maps.googleapis.com/maps/api/place/autocomplete/json?input=$query&components=country:ng&key=$apiKey';
+        'https://maps.googleapis.com/maps/api/place/autocomplete/json?input=${Uri.encodeComponent(query)}&components=country:ng&types=geocode|establishment&key=$apiKey';
 
     debugPrint('Autocomplete URL: $url');
     try {
@@ -285,12 +587,15 @@ class MapScreenState extends State<MapScreen> {
         setState(() {
           _suggestions = predictions.map<String>((p) => p['description'] as String).toList();
         });
+      } else if (data['status'] == 'ZERO_RESULTS') {
+        setState(() {
+          _suggestions = [];
+        });
       } else {
         debugPrint('Autocomplete Error: ${data['status']} - ${data['error_message'] ?? 'No error message'}');
         setState(() {
           _suggestions = [];
         });
-        // Optionally show error, but since it's onChanged, maybe not
       }
     } catch (e) {
       debugPrint('Autocomplete Exception: $e');
@@ -316,11 +621,16 @@ class MapScreenState extends State<MapScreen> {
     }
 
     final String apiKey = dotenv.env['GOOGLE_MAPS_API_KEY']!;
-    final String url =
-        'https://maps.googleapis.com/maps/api/directions/json?origin=$originAddress&destination=$destinationAddress&mode=$_travelMode&alternatives=true&traffic_model=best_guess&departure_time=now&key=$apiKey';
+    final String directionsUrl =
+        'https://maps.googleapis.com/maps/api/directions/json?origin=${Uri.encodeComponent(originAddress)}&destination=${Uri.encodeComponent(destinationAddress)}&mode=$_travelMode&region=ng&key=$apiKey';
+    
+    final String url = 'https://api.allorigins.win/raw?url=${Uri.encodeComponent(directionsUrl)}';
 
+    debugPrint('Directions URL: $directionsUrl');
     try {
       final response = await http.get(Uri.parse(url));
+      debugPrint('Directions Response Status: ${response.statusCode}');
+      debugPrint('Directions Response Body: ${response.body}');
       final data = json.decode(response.body);
 
       if (data['status'] == 'OK' && (data['routes'] as List).isNotEmpty) {
@@ -330,6 +640,19 @@ class MapScreenState extends State<MapScreen> {
         final List<LatLng> polylineCoordinates =
             _decodePolyline(encodedPolyline);
 
+        final bounds = data['routes'][0]['bounds'];
+        final northeast = LatLng(
+          bounds['northeast']['lat'],
+          bounds['northeast']['lng'],
+        );
+        final southwest = LatLng(
+          bounds['southwest']['lat'],
+          bounds['southwest']['lng'],
+        );
+
+        final leg = data['routes'][0]['legs'][0];
+        final steps = leg['steps'] as List;
+        
         setState(() {
           _polylines.clear();
           _polylines.add(
@@ -340,26 +663,52 @@ class MapScreenState extends State<MapScreen> {
               width: 5,
             ),
           );
-          final leg = data['routes'][0]['legs'][0];
           _distance = leg['distance']['text'];
           _eta = leg['duration']['text'];
-          _instructions = (leg['steps'] as List)
+          _instructions = steps
               .map<String>((step) => _stripHtmlTags(step['html_instructions'] as String))
               .toList();
+          
+          _navigationSteps = steps.map<Map<String, dynamic>>((step) => {
+            'instruction': _stripHtmlTags(step['html_instructions'] as String),
+            'distance': step['distance']['value'],
+            'duration': step['duration']['value'],
+            'end_location': step['end_location'],
+          }).toList();
+          
+          _destination = LatLng(
+            leg['end_location']['lat'],
+            leg['end_location']['lng'],
+          );
         });
+
+        mapController?.animateCamera(
+          CameraUpdate.newLatLngBounds(
+            LatLngBounds(southwest: southwest, northeast: northeast),
+            50,
+          ),
+        );
       } else {
-        debugPrint('Error getting directions: ${data['status']}');
+        final errorMsg = data['error_message'] ?? data['status'] ?? 'Unknown error';
+        debugPrint('Error getting directions: ${data['status']} - $errorMsg');
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Directions failed: ${data['status']}')),
+            SnackBar(
+              content: Text('Directions failed: $errorMsg'),
+              duration: const Duration(seconds: 5),
+            ),
           );
         }
       }
-    } catch (e) {
+    } catch (e, stackTrace) {
       debugPrint('Directions Exception: $e');
+      debugPrint('Stack trace: $stackTrace');
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Failed to get directions: Network error')),
+          SnackBar(
+            content: Text('Failed to get directions: ${e.toString()}'),
+            duration: const Duration(seconds: 5),
+          ),
         );
       }
     }
@@ -370,12 +719,113 @@ class MapScreenState extends State<MapScreen> {
     return htmlString.replaceAll(exp, '').replaceAll('&nbsp;', ' ');
   }
 
+  double _calculateDistance(LatLng pos1, LatLng pos2) {
+    const p = 0.017453292519943295;
+    final a = 0.5 - cos((pos2.latitude - pos1.latitude) * p) / 2 +
+        cos(pos1.latitude * p) * cos(pos2.latitude * p) *
+        (1 - cos((pos2.longitude - pos1.longitude) * p)) / 2;
+    return 12742 * asin(sqrt(a)) * 1000;
+  }
+
+  void _startNavigation() async {
+    if (_navigationSteps.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Please get directions first')),
+      );
+      return;
+    }
+
+    setState(() {
+      _isNavigating = true;
+      _currentStepIndex = 0;
+    });
+
+    await _flutterTts?.speak("Navigation started. ${_navigationSteps[0]['instruction']}");
+
+    const locationSettings = LocationSettings(
+      accuracy: LocationAccuracy.high,
+      distanceFilter: 10,
+    );
+
+    _positionStream = Geolocator.getPositionStream(locationSettings: locationSettings)
+        .listen((Position position) {
+      _onLocationUpdate(position);
+    });
+  }
+
+  void _stopNavigation() {
+    setState(() {
+      _isNavigating = false;
+    });
+    _positionStream?.cancel();
+    _flutterTts?.stop();
+    _flutterTts?.speak("Navigation stopped");
+  }
+
+  void _onLocationUpdate(Position position) {
+    final currentPos = LatLng(position.latitude, position.longitude);
+    
+    setState(() {
+      _currentPosition = currentPos;
+      _markers.removeWhere((m) => m.markerId.value == 'currentLocation');
+      _markers.add(
+        Marker(
+          markerId: const MarkerId('currentLocation'),
+          position: currentPos,
+          infoWindow: const InfoWindow(title: 'Your Location'),
+          icon: _carIcon ?? BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueBlue),
+          rotation: position.heading,
+        ),
+      );
+    });
+
+    mapController?.animateCamera(
+      CameraUpdate.newCameraPosition(
+        CameraPosition(
+          target: currentPos,
+          zoom: 18.0,
+          bearing: position.heading,
+          tilt: 45.0,
+        ),
+      ),
+    );
+
+    if (_currentStepIndex < _navigationSteps.length) {
+      final step = _navigationSteps[_currentStepIndex];
+      final stepLocation = LatLng(
+        step['end_location']['lat'],
+        step['end_location']['lng'],
+      );
+      
+      final distanceToStep = _calculateDistance(currentPos, stepLocation);
+      
+      if (distanceToStep < 50) {
+        _currentStepIndex++;
+        if (_currentStepIndex < _navigationSteps.length) {
+          final nextStep = _navigationSteps[_currentStepIndex];
+          _flutterTts?.speak(nextStep['instruction']);
+        } else {
+          _flutterTts?.speak("You have arrived at your destination");
+          _stopNavigation();
+        }
+      } else if (distanceToStep < 200) {
+        final distance = distanceToStep.round();
+        _flutterTts?.speak("In $distance meters, ${step['instruction']}");
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
         title: const Text("Google Maps - Nigeria"),
         actions: <Widget>[
+          IconButton(
+            icon: const Icon(Icons.help_outline),
+            tooltip: 'Location Help',
+            onPressed: _showLocationHelp,
+          ),
           IconButton(
             icon: const Icon(Icons.search),
             onPressed: () {
@@ -445,10 +895,46 @@ class MapScreenState extends State<MapScreen> {
                 ),
               ],
             ),
-            const ListTile(
-              leading: Icon(Icons.legend_toggle),
-              title: Text('Legend'),
+            ListTile(
+              leading: const Icon(Icons.bookmark),
+              title: const Text('Saved Places'),
+              trailing: Text('${_savedPlaces.length}'),
+              onTap: () {
+                Navigator.of(context).pop();
+                _navigateToSavedPlaces();
+              },
             ),
+            SwitchListTile(
+              secondary: const Icon(Icons.traffic),
+              title: const Text('Traffic Layer'),
+              subtitle: Text(_showTraffic ? 'Showing traffic' : 'Hidden'),
+              value: _showTraffic,
+              onChanged: (value) {
+                _toggleTraffic();
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.save_alt),
+              title: const Text('Save Current Location'),
+              onTap: () {
+                Navigator.of(context).pop();
+                _saveCurrentPlace();
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.offline_pin),
+              title: const Text('Offline Maps'),
+              onTap: () {
+                Navigator.of(context).pop();
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (context) => const OfflineMapsScreen(),
+                  ),
+                );
+              },
+            ),
+            const Divider(),
             ExpansionTile(
               leading: const Icon(Icons.directions),
               title: const Text('Directions'),
@@ -508,6 +994,12 @@ class MapScreenState extends State<MapScreen> {
             onMapCreated: onMapCreated,
             markers: _markers,
             polylines: _polylines,
+            padding: const EdgeInsets.only(bottom: 100, right: 10),
+            zoomControlsEnabled: true,
+            myLocationEnabled: true,
+            myLocationButtonEnabled: false,
+            trafficEnabled: _showTraffic,
+            onLongPress: _showSavePlaceDialog,
           ),
           Positioned(
             top: 10,
@@ -589,6 +1081,42 @@ class MapScreenState extends State<MapScreen> {
                 ),
               ),
             ),
+          if (_isNavigating && _currentStepIndex < _navigationSteps.length)
+            Positioned(
+              top: 80,
+              left: 10,
+              right: 10,
+              child: Card(
+                color: Colors.blue.shade700,
+                child: Padding(
+                  padding: const EdgeInsets.all(12.0),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          const Icon(Icons.navigation, color: Colors.white),
+                          const SizedBox(width: 8),
+                          const Text(
+                            'Navigating',
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontWeight: FontWeight.bold,
+                              fontSize: 16,
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+                      Text(
+                        _navigationSteps[_currentStepIndex]['instruction'],
+                        style: const TextStyle(color: Colors.white, fontSize: 14),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
           if (_eta != null && _distance != null)
             Positioned(
               bottom: 80,
@@ -602,37 +1130,55 @@ class MapScreenState extends State<MapScreen> {
                       Row(
                         mainAxisAlignment: MainAxisAlignment.spaceBetween,
                         children: [
-                          Text('Distance: $_distance'),
-                          Text('ETA: $_eta'),
+                          Text('Distance: $_distance', style: const TextStyle(fontWeight: FontWeight.bold)),
+                          Text('ETA: $_eta', style: const TextStyle(fontWeight: FontWeight.bold)),
                         ],
                       ),
-                      ElevatedButton(
-                        onPressed: () {
-                          showDialog(
-                            context: context,
-                            builder: (context) => AlertDialog(
-                              title: const Text('Turn-by-Turn Instructions'),
-                              content: SizedBox(
-                                width: double.maxFinite,
-                                child: ListView.builder(
-                                  itemCount: _instructions.length,
-                                  itemBuilder: (context, index) {
-                                    return ListTile(
-                                      title: Text(_instructions[index]),
-                                    );
-                                  },
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                        children: [
+                          ElevatedButton.icon(
+                            onPressed: () {
+                              showDialog(
+                                context: context,
+                                builder: (context) => AlertDialog(
+                                  title: const Text('Turn-by-Turn Instructions'),
+                                  content: SizedBox(
+                                    width: double.maxFinite,
+                                    child: ListView.builder(
+                                      itemCount: _instructions.length,
+                                      itemBuilder: (context, index) {
+                                        return ListTile(
+                                          leading: CircleAvatar(
+                                            child: Text('${index + 1}'),
+                                          ),
+                                          title: Text(_instructions[index]),
+                                        );
+                                      },
+                                    ),
+                                  ),
+                                  actions: [
+                                    TextButton(
+                                      onPressed: () => Navigator.of(context).pop(),
+                                      child: const Text('Close'),
+                                    ),
+                                  ],
                                 ),
-                              ),
-                              actions: [
-                                TextButton(
-                                  onPressed: () => Navigator.of(context).pop(),
-                                  child: const Text('Close'),
-                                ),
-                              ],
+                              );
+                            },
+                            icon: const Icon(Icons.list),
+                            label: const Text('Instructions'),
+                          ),
+                          ElevatedButton.icon(
+                            onPressed: _isNavigating ? _stopNavigation : _startNavigation,
+                            icon: Icon(_isNavigating ? Icons.stop : Icons.navigation),
+                            label: Text(_isNavigating ? 'Stop' : 'Start Navigation'),
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: _isNavigating ? Colors.red : Colors.green,
+                              foregroundColor: Colors.white,
                             ),
-                          );
-                        },
-                        child: const Text('View Instructions'),
+                          ),
+                        ],
                       ),
                     ],
                   ),
@@ -641,9 +1187,24 @@ class MapScreenState extends State<MapScreen> {
             ),
         ],
       ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: _addMarker,
-        child: const Icon(Icons.add_location),
+      floatingActionButton: Column(
+        mainAxisAlignment: MainAxisAlignment.end,
+        crossAxisAlignment: CrossAxisAlignment.end,
+        children: [
+          FloatingActionButton(
+            heroTag: 'myLocation',
+            onPressed: () => _getCurrentLocation(showMessage: true),
+            tooltip: 'My Location',
+            child: const Icon(Icons.my_location),
+          ),
+          const SizedBox(height: 10),
+          FloatingActionButton(
+            heroTag: 'addMarker',
+            onPressed: _addMarker,
+            tooltip: 'Add Marker',
+            child: const Icon(Icons.add_location),
+          ),
+        ],
       ),
     );
   }

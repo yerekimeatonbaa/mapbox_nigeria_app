@@ -1,8 +1,8 @@
 name: google_maps_nigeria_app
-description: A Flutter app showing Google Maps with Nigerian locations
+description: GPS Navigation for Nigeria - Offline Maps, Traffic, Voice Guidance & Saved Places
 publish_to: 'none'
 
-version: 1.0.0+1
+version: 2.0.0+2
 
 environment:
   sdk: ">=3.2.0 <4.0.0"
@@ -13,14 +13,29 @@ dependencies:
   google_maps_flutter: ^2.5.3
   google_maps_flutter_platform_interface: ^2.6.1
   geolocator: ^13.0.0
+  flutter_tts: ^4.0.2
   
   http: ^1.2.1
   flutter_dotenv: ^5.1.0
+  
+  # Local storage for saved places
+  shared_preferences: ^2.2.2
+  sqflite: ^2.3.0
+  path_provider: ^2.1.1
+  path: ^1.8.3
+  
+  # Offline maps caching
+  flutter_cache_manager: ^3.3.1
+  
+  # JSON serialization
+  json_annotation: ^4.8.1
 
 dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^3.0.0
+  build_runner: ^2.4.7
+  json_serializable: ^6.7.1
 
 flutter:
   uses-material-design: true

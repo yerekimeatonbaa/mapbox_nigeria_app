@@ -2,6 +2,9 @@
   <uses-permission android:name="android.permission.INTERNET"/>
   <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
   <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
+  <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION"/>
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION"/>
     <application
         android:label="Trail_App"
         android:name="${applicationName}"
@@ -9,7 +12,7 @@
         <!-- Google Maps API key meta-data -->
         <meta-data
             android:name="com.google.android.geo.API_KEY"
-            android:value="AIzaSyD3Ot82iTrRjeLfFLvrp7dznfdHi8DzRpw"/>
+            android:value="AIzaSyADOsXDqg6KSUqM8Z8ukAxobjqVey0seTk"/>
         <activity
             android:name=".MainActivity"
             android:exported="true"
